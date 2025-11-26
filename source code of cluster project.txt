@@ -1,0 +1,44 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, coalesce, lit, nanvl, when
+from pyspark.ml.feature import StringIndexer, VectorAssembler
+from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+
+spark = SparkSession.builder.appName("ForestFireRiskClassification").getOrCreate()
+
+df = spark.read.csv("data/forestfires.csv", header=True, inferSchema=True)
+
+df = df.withColumn("temp", coalesce(nanvl(col("temp"), lit(None)), lit(18.8)))
+df = df.withColumn("RH", coalesce(col("RH"), lit(44)))
+df = df.withColumn("wind", coalesce(nanvl(col("wind"), lit(None)), lit(4.0)))
+
+indexer_month = StringIndexer(inputCol="month", outputCol="month_index")
+indexer_day = StringIndexer(inputCol="day", outputCol="day_index")
+df = indexer_month.fit(df).transform(df)
+df = indexer_day.fit(df).transform(df)
+
+df = df.withColumn("fire_occurred", when(col("area") > 0, 1).otherwise(0))
+
+feature_cols = ["X", "Y", "FFMC", "DMC", "DC", "ISI", "temp", "RH", "wind", "rain", "month_index", "day_index"]
+assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
+final_df = assembler.transform(df).select("features", "fire_occurred")
+
+train, test = final_df.randomSplit([0.8, 0.2], seed=42)
+
+rf = RandomForestClassifier(labelCol="fire_occurred", featuresCol="features", numTrees=50)
+model = rf.fit(train)
+
+predictions = model.transform(test)
+predictions.select("fire_occurred", "prediction").show(10)
+
+evaluator_acc = MulticlassClassificationEvaluator(labelCol="fire_occurred", metricName="accuracy")
+evaluator_f1 = MulticlassClassificationEvaluator(labelCol="fire_occurred", metricName="f1")
+
+accuracy = evaluator_acc.evaluate(predictions)
+f1_score = evaluator_f1.evaluate(predictions)
+
+print("Model Evaluation Results:")
+print("Accuracy:", accuracy)
+print("F1 Score:", f1_score)
+
+spark.stop()
